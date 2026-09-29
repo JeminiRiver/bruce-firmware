@@ -35,6 +35,11 @@
  *   - Steps are accumulated and a position change is only committed
  *     once a full detent's worth of valid transitions has been seen,
  *     blocking partial/half-detent noise from ever reaching callers.
+ *   - Optional reset-on-reversal (opt-in via begin(..., resetOnReverse=true)):
+ *     suppressing detented-encoder hysteresis jitter. i.e. the detent-boundary
+ *     "wobble" that mechanical encoders exhibit when rocked between notches.
+ *     Disabled by default, so non-opt-in boards keep the original never-reset
+ *     accumulator behavior unchanged.
  *   - No time-based idle/staleness reset exists here, same as Flipper --
  *     it does not exist in target_input.c's encoder logic either.
  *
@@ -64,10 +69,11 @@ static const int8_t ROTARY_DECODER_ENC_TABLE[16] = {
 // clang-format on
 class RotaryDecoder {
 public:
-    void begin(uint8_t pinA, uint8_t pinB, uint8_t stepsPerDetent = 2) {
+    void begin(uint8_t pinA, uint8_t pinB, uint8_t stepsPerDetent = 2, bool resetOnReverse = false) {
         _pinA = pinA;
         _pinB = pinB;
         _stepsPerDetent = stepsPerDetent;
+        _resetOnReverse = resetOnReverse;
         bool a = digitalRead(_pinA);
         bool b = digitalRead(_pinB);
         _abState = (a << 1) | b;
@@ -86,21 +92,47 @@ public:
         if (newAb == _abState) return; // no change since last poll
 
         int8_t delta = ROTARY_DECODER_ENC_TABLE[(_abState << 2) | newAb];
+
+        if (delta == 0) { // invalid transition (bounce). update ref and skip it
+            _abState = newAb;
+            return;
+        }
+
         _abState = newAb;
 
-        if (delta == 0) return; // invalid transition (bounce) -- skip it
-
-        // Raw quarter-step counter, never reset -- position is always the
-        // floor division of this by stepsPerDetent. Since _rawPosition mod
-        // stepsPerDetent lines up exactly with the physical cycle position
-        // regardless of path taken to get there, this commits a step the
-        // instant enough net valid transitions have been seen, works the
-        // same for stepsPerDetent == 2 or == 4, and never throws away
-        // leftover sub-detent progress the way resetting an accumulator on
-        // threshold would (that reset was losing/misaligning steps whenever
-        // a poll pass missed a sample or caught trailing contact bounce).
-        _rawPosition += delta;
-        _position = floorDiv(_rawPosition, (int32_t)_stepsPerDetent);
+        // Opt-in for detented-encoders sensitive to jitters
+        if (_resetOnReverse) {
+            // if the shaft reverses before a full detent's worth of same-direction transitions has
+            // accumulated, discard the partial progress so a boundary "wobble" never commits a step
+            // in either direction.
+            if (_rawPosition != 0 && ((_rawPosition > 0) != (delta > 0))) {
+                _rawPosition = 0;
+            }
+            _rawPosition += delta;
+            // Consume full detents, leaving a bounded remainder in
+            // (-stepsPerDetent, stepsPerDetent) so the next reversal can be
+            // detected cleanly.
+            while (_rawPosition >= (int32_t)_stepsPerDetent) {
+                _rawPosition -= (int32_t)_stepsPerDetent;
+                _position++;
+            }
+            while (_rawPosition <= -(int32_t)_stepsPerDetent) {
+                _rawPosition += (int32_t)_stepsPerDetent;
+                _position--;
+            }
+        } else {
+            // Raw quarter-step counter, never reset -- position is always the
+            // floor division of this by stepsPerDetent. Since _rawPosition mod
+            // stepsPerDetent lines up exactly with the physical cycle position
+            // regardless of path taken to get there, this commits a step the
+            // instant enough net valid transitions have been seen, works the
+            // same for stepsPerDetent == 2 or == 4, and never throws away
+            // leftover sub-detent progress the way resetting an accumulator on
+            // threshold would (that reset was losing/misaligning steps whenever
+            // a poll pass missed a sample or caught trailing contact bounce).
+            _rawPosition += delta;
+            _position = floorDiv(_rawPosition, (int32_t)_stepsPerDetent);
+        }
     }
 
     int32_t getPosition() { return _position; }
@@ -115,6 +147,7 @@ private:
     uint8_t _pinA = 0;
     uint8_t _pinB = 0;
     uint8_t _stepsPerDetent = 2;
+    bool _resetOnReverse = false;
     uint8_t _abState = 0;
     int32_t _rawPosition = 0;
     // Written by the dedicated encoder-poll task, read by InputHandler()

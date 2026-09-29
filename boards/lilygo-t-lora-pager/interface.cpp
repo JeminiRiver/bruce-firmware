@@ -12,6 +12,10 @@ extern RotaryDecoder *encoder;
 RotaryDecoder *encoder = nullptr;
 void pollEncoder(void) { encoder->poll(); }
 
+// Discard partial sub-detent progress on direction reversal, so boundary
+// "wobble" never commits a step (opt-in to RotaryDecoder's reset-on-reversal).
+constexpr bool kResetOnReverse = true;
+
 // Charger chip
 #define XPOWERS_CHIP_BQ25896
 #include <XPowersLib.h>
@@ -215,7 +219,7 @@ void _setup_gpio() {
     pinMode(ENCODER_INA, INPUT_PULLUP);
     pinMode(ENCODER_INB, INPUT_PULLUP);
     encoder = new RotaryDecoder();
-    encoder->begin(ENCODER_INB, ENCODER_INA, 4);
+    encoder->begin(ENCODER_INB, ENCODER_INA, 4, kResetOnReverse);
 
     // Haptic driver
     if (!drv.begin(Wire, SDA, SCL)) {
